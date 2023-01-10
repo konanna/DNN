@@ -85,9 +85,9 @@ class Trainer():
             correct = 0
             total = 0
             for batch in tqdm(trainloader):
-                # округление фазы при дискретной толщине слоёв маски
-                if discrete_thickness and self.model.mask_layers[0].n:
-                    self.model.round_phase(discrete_thickness)
+                # # округление фазы при дискретной толщине слоёв маски
+                # if discrete_thickness and self.model.mask_layers[0].n:
+                #     self.model.round_phase(discrete_thickness)
 
                 loss, batch_correct, batch_total = self.epoch_step(batch, unconstrain_phase)
                 ep_loss += loss.item()
@@ -147,8 +147,6 @@ class MaskLayer(torch.nn.Module):
     """
     Класс для амплитудно-фазовой маски
     """
-
-    # сюда следует добавить возможность дискретизации толщин пикселей маски
     def __init__(self, distance_before_mask=None, wl=532e-9, N_pixels=400, pixel_size=20e-6, N_neurons=20,
                  include_amplitude=False, n=None):
         """
@@ -207,9 +205,8 @@ class MaskLayer(torch.nn.Module):
             if self.n is None:
                 constr_amp = F.relu(self.amplitude) / F.relu(self.amplitude).max()
             else:
-                constr_amp = torch.exp(
-                    - np.imag(self.n[:, None, None]) * 2 * np.pi / self.wl[:, None, None] * self.calc_thickness(
-                        constr_phase))
+                constr_amp = torch.exp(- self.n.imag[:, None, None] * 2 * np.pi / self.wl[:, None, None]
+                                       * self.calc_thickness(constr_phase))
             modulation = constr_amp * modulation
         modulation = transforms.functional.resize(modulation.real, self.N_pixels, transforms.InterpolationMode.NEAREST)\
             + 1j * transforms.functional.resize(modulation.imag, self.N_pixels, transforms.InterpolationMode.NEAREST)
@@ -356,11 +353,13 @@ class new_Fourier_DNN(torch.nn.Module):
         return E_abs.sum(dim=1), outputs
 
     def round_phase(self, thick_discr):
-        phase_discr = (self.mask_layers[0].n.real) * thick_discr * 2 * np.pi / self.mask_layers[0].wl
+        # разобраться с амплитудной модуляцией
+        thickness_phase_ratio = self.mask_layers[0].wl / self.mask_layers[0].n.real
         with torch.no_grad():
             for name, param in self.named_parameters():
-                param.copy_(
-                    torch.round(param.clone().detach() / phase_discr[:, None, None]) * phase_discr[:, None, None])
+                thickness = torch.sigmoid(param) * thickness_phase_ratio
+                thickness = torch.round(thickness / thick_discr) * thick_discr
+                param.copy_(torch.special.logit(thickness / thickness_phase_ratio))
 
     @property
     def device(self):
