@@ -80,14 +80,13 @@ class real_space_DNN(torch.nn.Module):
         outputs = [x]
         for n in range(self.n_layers):
             x = self.img_propagation(n, x)
+            outputs.append(x)
             x = self.exp_j_phase(n, unconstrained_phase) * x
             outputs.append(x)
         x = self.img_propagation(self.n_layers, x)
         outputs.append(x)
         x_abs = torch.abs(x) ** 2
-        # output = self.softmax(detector_region(x_abs))
-        # output = Trainer.detector_region(x_abs)
-        return x_abs, outputs
+        return x_abs.sum(dim=1), outputs
 
     def exp_j_phase(self, num_layer, unconstrained_phase=False):
         if unconstrained_phase:
@@ -120,8 +119,8 @@ class real_space_DNN(torch.nn.Module):
         x1_grid, x2_grid = torch.meshgrid(coordinates1, coordinates2, indexing='ij')
         dx = x1_grid - x2_grid
         dy = dx.clone()
-        dx = dx[None, :, None, :, None]
-        dy = dy[None, None, :, None, :]
+        dx = dx[None, None, :, None, :, None]
+        dy = dy[None, None, None, :, None, :]
         r_tensor = torch.sqrt(dx ** 2 + dy ** 2 + dist_z ** 2)
 
         prop_multiplier = size1 ** 2 * dist_z / (r_tensor ** 2) * (
@@ -136,9 +135,9 @@ class real_space_DNN(torch.nn.Module):
         :param input_tensor изображение на выходе предыдущего слоя
         """
         if num_layer == 0:
-            output_tensor = (self.input_prop_multiplier * input_tensor[:, :, :, None, None]).sum(dim=(1, 2))
+            output_tensor = (self.input_prop_multiplier * input_tensor[:, :, :, :, None, None]).sum(dim=(2, 3))
         else:
-            output_tensor = (self.prop_multiplier * input_tensor[:, :, :, None, None]).sum(dim=(1, 2))
+            output_tensor = (self.prop_multiplier * input_tensor[:,:, :, :, None, None]).sum(dim=(2, 3))
         return output_tensor
 
     @property
@@ -181,7 +180,6 @@ class real_space_DNN_conv(torch.nn.Module):
         # self.softmax = torch.nn.Softmax(dim=-1)
 
     def forward(self, x, unconstrained_phase=False):
-        x = x[:,None,:,:]
         outputs = [x]
         for n in range(self.n_layers):
             x = self.img_propagation(n, x)
@@ -192,7 +190,7 @@ class real_space_DNN_conv(torch.nn.Module):
         x_abs = torch.abs(x) ** 2
         # output = self.softmax(detector_region(x_abs))
         # output = Trainer.detector_region(x_abs)
-        return x_abs, outputs
+        return x_abs.sum(dim=1), outputs
 
     def exp_j_phase(self, num_layer, unconstrained_phase=False):
         if unconstrained_phase:
@@ -201,7 +199,7 @@ class real_space_DNN_conv(torch.nn.Module):
             constr_phase = 2 * np.pi * torch.sigmoid(self.phase[num_layer])
         constr_phase = transforms.functional.resize(constr_phase[None, :, :], self.N_pixels,
                                                     transforms.InterpolationMode.NEAREST).squeeze()
-        a = torch.exp(1j * constr_phase)
+        a = torch.exp(1j * constr_phase.to(self.device))
         return a
 
     def prop_count(self, num_layer):
