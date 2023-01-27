@@ -43,7 +43,7 @@ class Trainer():
                 (x[:, det_x0: det_x1 + 1, det_y0: det_y1 + 1].sum(dim=(1, 2)) / full_int).unsqueeze(-1))
         return torch.cat(detectors_list, dim=1)
 
-    def epoch_step(self, batch, unconstrain_phase=False):
+    def epoch_step(self, batch, unconstrain_phase=False, thickness_disscretization=0):
         """
         Обработка одного батча в процессе тренировки.
         param batch: (imgs, labels) батч с изображениями и их метками
@@ -53,7 +53,7 @@ class Trainer():
         images = F.pad(images, pad=(self.padding, self.padding, self.padding, self.padding))
         labels = labels.to(self.device)
 
-        out_img, _ = self.model(images, unconstrain_phase)
+        out_img, _ = self.model(images, unconstrain_phase, thickness_disscretization)
 
         out_label = self.detector_region(out_img)
         _, predicted = torch.max(out_label.data, 1)
@@ -68,8 +68,8 @@ class Trainer():
               trainloader,
               testloader,
               epochs=10,
-              discrete_thickness=None,
-              unconstrain_phase=False):
+              unconstrain_phase=False,
+              thickness_disscretization=0):
         """
         Функция для тренировки сети.
         """
@@ -85,11 +85,8 @@ class Trainer():
             correct = 0
             total = 0
             for batch in tqdm(trainloader):
-                # # округление фазы при дискретной толщине слоёв маски
-                # if discrete_thickness and self.model.mask_layers[0].n:
-                #     self.model.round_phase(discrete_thickness)
-
-                loss, batch_correct, batch_total = self.epoch_step(batch, unconstrain_phase)
+                loss, batch_correct, batch_total = self.epoch_step(batch, unconstrain_phase,
+                                                                   thickness_disscretization)
                 ep_loss += loss.item()
                 correct += batch_correct
                 total += batch_total
@@ -147,6 +144,7 @@ class MaskLayer(torch.nn.Module):
     """
     Класс для амплитудно-фазовой маски
     """
+
     def __init__(self, distance_before_mask=None, wl=532e-9, N_pixels=400, pixel_size=20e-6, N_neurons=20,
                  include_amplitude=False, n=None):
         """
@@ -192,12 +190,14 @@ class MaskLayer(torch.nn.Module):
         self.N_neurons = N_neurons
         # self.n = n
 
-    def forward(self, E, unconstrain_phase=False):
+    def forward(self, E, unconstrain_phase=False, thickness_discretization=0):
         out = E
         if self.diffractive_layer is not None:
             out = self.diffractive_layer(out)
         if unconstrain_phase:
             constr_phase = self.phase
+        elif thickness_discretization:
+            constr_phase = self.custom_step_function(thickness_discretization)
         else:
             constr_phase = 2 * np.pi * torch.sigmoid(self.phase)
         modulation = torch.cos(constr_phase) + 1j * torch.sin(constr_phase)
@@ -208,8 +208,9 @@ class MaskLayer(torch.nn.Module):
                 constr_amp = torch.exp(- self.n.imag[:, None, None] * 2 * np.pi / self.wl[:, None, None]
                                        * self.calc_thickness(constr_phase))
             modulation = constr_amp * modulation
-        modulation = transforms.functional.resize(modulation.real, self.N_pixels, transforms.InterpolationMode.NEAREST)\
-            + 1j * transforms.functional.resize(modulation.imag, self.N_pixels, transforms.InterpolationMode.NEAREST)
+        modulation = transforms.functional.resize(modulation.real, self.N_pixels, transforms.InterpolationMode.NEAREST) \
+                     + 1j * transforms.functional.resize(modulation.imag, self.N_pixels,
+                                                         transforms.InterpolationMode.NEAREST)
         out = modulation * out
         return out
 
@@ -221,6 +222,15 @@ class MaskLayer(torch.nn.Module):
             phase = 2 * np.pi * torch.sigmoid(self.phase)
         thickness = self.wl[:, None, None] * phase / (2 * np.pi * np.real(self.n[:, None, None]))
         return thickness
+
+    def custom_step_function(self, thickness_discretization, alpha=100):
+        new_phase = torch.zeros(self.phase.shape, dtype=torch.float32, device=self.phase.device)
+        phase_discr = thickness_discretization * np.real(self.n[:, None, None]) / self.wl[:, None, None]
+        phase_offset = 0.5 * phase_discr
+        while phase_offset[0,0,0] < 2 * np.pi:
+            new_phase = new_phase + phase_discr * torch.sigmoid(alpha * (self.phase - phase_offset))
+            phase_offset = phase_offset + phase_discr
+        return new_phase
 
 
 class DNN(torch.nn.Module):
@@ -336,14 +346,14 @@ class new_Fourier_DNN(torch.nn.Module):
                                                           include_amplitude=include_amplitude_modulation,
                                                           n=dn) for _ in range(0, num_layers)])
 
-    def forward(self, E, unconsrtain_phase=False):
+    def forward(self, E, unconsrtain_phase=False, thick_discr=0):
         outputs = [E]
         E = self.lens_diffractive_layer(E)
         E = self.lens(E)
         E = self.first_diffractive_layer(E)
         outputs.append(E)
         for layer in self.mask_layers:
-            E = layer(E, unconsrtain_phase)
+            E = layer(E, unconsrtain_phase, thick_discr)
             outputs.append(E)
         E = self.lens_diffractive_layer(E)
         E = self.lens(E)
