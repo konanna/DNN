@@ -14,7 +14,7 @@ DETECTOR_POS = [
 ]
 
 
-class Trainer():
+class Trainer:
     """
     Класс для тренировки оптической нейронной сети.
     param model: Модель нейронной сети для обучения
@@ -43,7 +43,7 @@ class Trainer():
                 (x[:, det_x0: det_x1 + 1, det_y0: det_y1 + 1].sum(dim=(1, 2)) / full_int).unsqueeze(-1))
         return torch.cat(detectors_list, dim=1)
 
-    def epoch_step(self, batch, unconstrain_phase=False, thickness_disscretization=0):
+    def epoch_step(self, batch, unconstrain_phase=False, thickness_discretization=0):
         """
         Обработка одного батча в процессе тренировки.
         param batch: (imgs, labels) батч с изображениями и их метками
@@ -53,7 +53,7 @@ class Trainer():
         images = F.pad(images, pad=(self.padding, self.padding, self.padding, self.padding))
         labels = labels.to(self.device)
 
-        out_img, _ = self.model(images, unconstrain_phase, thickness_disscretization)
+        out_img, _ = self.model(images, unconstrain_phase, thickness_discretization)
 
         out_label = self.detector_region(out_img)
         _, predicted = torch.max(out_label.data, 1)
@@ -69,7 +69,7 @@ class Trainer():
               testloader,
               epochs=10,
               unconstrain_phase=False,
-              thickness_disscretization=0):
+              thickness_discretization=0):
         """
         Функция для тренировки сети.
         """
@@ -86,7 +86,7 @@ class Trainer():
             total = 0
             for batch in tqdm(trainloader):
                 loss, batch_correct, batch_total = self.epoch_step(batch, unconstrain_phase,
-                                                                   thickness_disscretization)
+                                                                   thickness_discretization)
                 ep_loss += loss.item()
                 correct += batch_correct
                 total += batch_total
@@ -176,8 +176,10 @@ class MaskLayer(torch.nn.Module):
         except TypeError:
             n = [n]
         finally:
-            if n_size == wl_size or n_size == 1:
+            if n_size == wl_size:
                 self.register_buffer('n', torch.tensor(n, dtype=torch.complex64))
+            elif n_size == 1:
+                self.register_buffer('n', torch.ones(wl_size, dtype=torch.complex64)*n[0])
             else:
                 raise Exception("Numbers of wl does not match number of n")
 
@@ -188,7 +190,6 @@ class MaskLayer(torch.nn.Module):
         self.N_pixels = N_pixels
         self.pixel_size = pixel_size
         self.N_neurons = N_neurons
-        # self.n = n
 
     def forward(self, E, unconstrain_phase=False, thickness_discretization=0):
         out = E
@@ -197,7 +198,7 @@ class MaskLayer(torch.nn.Module):
         if unconstrain_phase:
             constr_phase = self.phase
         elif thickness_discretization:
-            constr_phase = self.custom_step_function(thickness_discretization)
+            constr_phase = self.sigmoid_step_function(self.phase, thickness_discretization)
         else:
             constr_phase = 2 * np.pi * torch.sigmoid(self.phase)
         modulation = torch.cos(constr_phase) + 1j * torch.sin(constr_phase)
@@ -208,9 +209,10 @@ class MaskLayer(torch.nn.Module):
                 constr_amp = torch.exp(- self.n.imag[:, None, None] * 2 * np.pi / self.wl[:, None, None]
                                        * self.calc_thickness(constr_phase))
             modulation = constr_amp * modulation
-        modulation = transforms.functional.resize(modulation.real, self.N_pixels, transforms.InterpolationMode.NEAREST) \
-                     + 1j * transforms.functional.resize(modulation.imag, self.N_pixels,
-                                                         transforms.InterpolationMode.NEAREST)
+        modulation = transforms.functional.resize(modulation.real, self.N_pixels,
+                                                  transforms.InterpolationMode.NEAREST) \
+                     + transforms.functional.resize(modulation.imag, self.N_pixels,
+                                                    transforms.InterpolationMode.NEAREST) * 1j
         out = modulation * out
         return out
 
@@ -223,12 +225,22 @@ class MaskLayer(torch.nn.Module):
         thickness = self.wl[:, None, None] * phase / (2 * np.pi * np.real(self.n[:, None, None]))
         return thickness
 
-    def custom_step_function(self, thickness_discretization, alpha=100):
-        new_phase = torch.zeros(self.phase.shape, dtype=torch.float32, device=self.phase.device)
+    def sigmoid_step_function(self, phase, thickness_discretization, alpha=100):
+        new_phase = torch.zeros(phase.shape, dtype=torch.float32, device=phase.device)
         phase_discr = thickness_discretization * np.real(self.n[:, None, None]) / self.wl[:, None, None]
         phase_offset = 0.5 * phase_discr
-        while phase_offset[0,0,0] < 2 * np.pi:
-            new_phase = new_phase + phase_discr * torch.sigmoid(alpha * (self.phase - phase_offset))
+        while phase_offset[0, 0, 0] < 2 * np.pi:
+            new_phase = new_phase + phase_discr * torch.sigmoid(alpha * (phase - phase_offset))
+            phase_offset = phase_offset + phase_discr
+        return new_phase
+
+    def true_step_function(self, phase, thickness_discretization):
+        new_phase = torch.zeros(phase.shape, dtype=torch.float32, device=phase.device)
+        phase_discr = thickness_discretization * np.real(self.n[:, None, None]) / self.wl[:, None, None]
+        phase_offset = 0.5 * phase_discr
+        zero_values = torch.zeros(phase.shape, dtype=torch.float32, device=phase.device)
+        while phase_offset[0, 0, 0] < 2 * np.pi:
+            new_phase = new_phase + phase_discr * torch.heaviside((phase - phase_offset), zero_values)
             phase_offset = phase_offset + phase_discr
         return new_phase
 
@@ -361,15 +373,6 @@ class new_Fourier_DNN(torch.nn.Module):
         E = self.lens_diffractive_layer(E)
         E_abs = torch.abs(E) ** 2
         return E_abs.sum(dim=1), outputs
-
-    def round_phase(self, thick_discr):
-        # разобраться с амплитудной модуляцией
-        thickness_phase_ratio = self.mask_layers[0].wl / self.mask_layers[0].n.real
-        with torch.no_grad():
-            for name, param in self.named_parameters():
-                thickness = torch.sigmoid(param) * thickness_phase_ratio
-                thickness = torch.round(thickness / thick_discr) * thick_discr
-                param.copy_(torch.special.logit(thickness / thickness_phase_ratio))
 
     @property
     def device(self):

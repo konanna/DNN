@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import torch.nn.functional as F
 import numpy as np
+import pandas as pd
 
 
 def generate_det_row(det_size, start_pos_x, start_pos_y, det_step, N_det):
@@ -59,19 +60,25 @@ def visualize(model, example, padding=58):
     plt.show()
 
 
-def mask_visualization(model, wl=None, n=None):
-    plt.figure(figsize=(20, 30))
+def mask_visualization(model, mode='phase'):
+    wl = model.mask_layers[0].wl
+    n = np.real(model.mask_layers[0].n)
+    n_wl = wl.shape[0]
+    n_layers = len(model.mask_layers)
+    plt.figure(figsize=(10*n_wl, 7*n_layers))
     for i, mask in enumerate(model.mask_layers):
         phase = torch.sigmoid(mask.phase.detach().cpu())
-        n_wl = phase.shape[0]
         for j in range(n_wl):
             plt.subplot(len(model.mask_layers), n_wl, (j + 1) + i * n_wl)
-            if wl is None:
+            if mode == 'phase':
                 plt.imshow(phase[j, :, :] * 360, interpolation='none')
                 plt.colorbar(label='Phase, deg.')
-            else:
-                plt.imshow(phase[j, :, :] * wl * 10 ** 6 / n, interpolation='none')
+            elif mode == 'thickness':
+                plt.imshow(phase[j, :, :] * wl[j, None, None] * 10 ** 6 / n[j, None, None],
+                           interpolation='none')
                 plt.colorbar(label='Thickness, um')
+            else:
+                print(f'Do not support mode = "{mode}". Only "thickness" or "phase"')
             plt.title(f'Mask {j + 1} of layer {i + 1}')
 
 
@@ -102,6 +109,36 @@ def visualize_n_samples(model,
                                          facecolor='none')
                 plt.gca().add_patch(rect)
     plt.title(f'Output image')
+
+
+def save_tensor(tensor, filename, file_format="pt"):
+    if file_format == "pt":
+        torch.save(tensor, filename + ".pt")
+    elif file_format == "csv":
+        df = pd.DataFrame(tensor.detach().numpy())
+        df.to_csv(filename + ".csv", index=False)
+
+
+def save_masks(model, thickness_discretization=0, file_format="pt"):
+    wl = model.mask_layers[0].wl
+    n = np.real(model.mask_layers[0].n)
+    n_wl = wl.shape[0]
+    for i, mask in enumerate(model.mask_layers):
+        if thickness_discretization:
+            thickness = mask.sigmoid_step_function(mask.phase, thickness_discretization) * \
+                        wl[:, None, None] * 10 ** 6 / n[:, None, None]
+            discrete_thickness = mask.true_step_function(mask.phase, thickness_discretization) * \
+                                 wl[:, None, None] * 10 ** 6 / n[:, None, None]
+        else:
+            thickness = torch.sigmoid(mask.phase.detach().cpu()) * wl[:, None, None] * 10 ** 6 / n[:, None, None]
+        for j in range(n_wl):
+            filename = "mask_" + str(i) + "_layer_" + str(j)
+            save_tensor(thickness[j, :, :], filename, file_format)
+            if thickness_discretization:
+                save_tensor((discrete_thickness - thickness)[j, :, :], filename + "_error", file_format)
+                save_tensor(discrete_thickness[j, :, :], filename + "_discrete", file_format)
+                save_tensor((discrete_thickness / thickness_discretization / 10**6 )[j, :, :],
+                            filename + "_steps", file_format)
 
 
 def prop_vis(model, example, padding=58, mode='abs', name_list=None):
