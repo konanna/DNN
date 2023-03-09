@@ -61,8 +61,8 @@ def visualize(model, example, padding=58):
 
 
 def mask_visualization(model, mode='phase'):
-    wl = model.mask_layers[0].wl
-    n = np.real(model.mask_layers[0].n)
+    wl = model.mask_layers[0].wl.detach().cpu()
+    n = np.real(model.mask_layers[0].n.detach().cpu())
     n_wl = wl.shape[0]
     n_layers = len(model.mask_layers)
     plt.figure(figsize=(10*n_wl, 7*n_layers))
@@ -115,7 +115,7 @@ def save_tensor(tensor, filename, file_format="pt"):
     if file_format == "pt":
         torch.save(tensor, filename + ".pt")
     elif file_format == "csv":
-        df = pd.DataFrame(tensor.detach().numpy())
+        df = pd.DataFrame(tensor.detach().cpu().numpy())
         df.to_csv(filename + ".csv", index=False)
 
 
@@ -132,12 +132,12 @@ def save_masks(model, thickness_discretization=0, file_format="pt"):
         else:
             thickness = torch.sigmoid(mask.phase.detach().cpu()) * wl[:, None, None] * 10 ** 6 / n[:, None, None]
         for j in range(n_wl):
-            filename = "mask_" + str(i) + "_layer_" + str(j)
+            filename = "mask_" + str(j) + "_layer_" + str(i)
             save_tensor(thickness[j, :, :], filename, file_format)
             if thickness_discretization:
                 save_tensor((discrete_thickness - thickness)[j, :, :], filename + "_error", file_format)
                 save_tensor(discrete_thickness[j, :, :], filename + "_discrete", file_format)
-                save_tensor((discrete_thickness / thickness_discretization / 10**6 )[j, :, :],
+                save_tensor((discrete_thickness / thickness_discretization / 10**6)[j, :, :],
                             filename + "_steps", file_format)
 
 
