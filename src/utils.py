@@ -1,4 +1,5 @@
 from itertools import chain
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 import torch
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -60,26 +61,36 @@ def visualize(model, example, padding=58):
     plt.show()
 
 
-def mask_visualization(model, mode='phase'):
+def mask_visualization(model, mode='phase', transpose=False):
     wl = model.mask_layers[0].wl.detach().cpu()
     n = np.real(model.mask_layers[0].n.detach().cpu())
     n_wl = wl.shape[0]
     n_layers = len(model.mask_layers)
-    plt.figure(figsize=(10*n_wl, 7*n_layers))
+    if transpose:
+        plt.figure(figsize=(5 * n_layers, 4 * n_wl))
+    else:
+        plt.figure(figsize=(5 * n_wl, 4 * n_layers))
     for i, mask in enumerate(model.mask_layers):
         phase = torch.sigmoid(mask.phase.detach().cpu())
         for j in range(n_wl):
-            plt.subplot(len(model.mask_layers), n_wl, (j + 1) + i * n_wl)
+            colorbar_label = 'Phase, deg.'
+            if transpose:
+                plt.subplot(n_wl, n_layers, (i + 1) + j * n_layers)
+            else:
+                plt.subplot(n_layers, n_wl, (j + 1) + i * n_wl)
             if mode == 'phase':
                 plt.imshow(phase[j, :, :] * 360, interpolation='none')
-                plt.colorbar(label='Phase, deg.')
             elif mode == 'thickness':
                 plt.imshow(phase[j, :, :] * wl[j, None, None] * 10 ** 6 / n[j, None, None],
                            interpolation='none')
-                plt.colorbar(label='Thickness, um')
+                colorbar_label = 'Thickness, um';
             else:
                 print(f'Do not support mode = "{mode}". Only "thickness" or "phase"')
             plt.title(f'Mask {j + 1} of layer {i + 1}')
+            ax = plt.gca()
+            divider = make_axes_locatable(ax)
+            cax = divider.append_axes("right", size="5%", pad=0.05)
+            plt.colorbar(label=colorbar_label, cax=cax)
 
 
 def visualize_n_samples(model,
@@ -89,7 +100,7 @@ def visualize_n_samples(model,
                         detector_pos=None,
                         unconstain_phase=False,
                         seed=17):
-    plt.figure(figsize=(25, 8))
+    plt.figure(figsize=(5 * n, 8))
     np.random.seed(seed)
     rand_ind = np.random.choice(range(len(dataset)), size=n, replace=False)
     device = model.device
@@ -111,15 +122,15 @@ def visualize_n_samples(model,
     plt.title(f'Output image')
 
 
-def save_tensor(tensor, filename, file_format="pt"):
+def save_tensor(tensor, filename, file_format="pt", float_format=None):
     if file_format == "pt":
         torch.save(tensor, filename + ".pt")
     elif file_format == "csv":
         df = pd.DataFrame(tensor.detach().cpu().numpy())
-        df.to_csv(filename + ".csv", index=False)
+        df.to_csv(filename + ".csv", float_format=float_format, index=False)
 
 
-def save_masks(model, thickness_discretization=0, file_format="pt"):
+def save_masks(model, thickness_discretization=0, file_format="pt", float_format=None):
     wl = model.mask_layers[0].wl
     n = np.real(model.mask_layers[0].n)
     n_wl = wl.shape[0]
@@ -133,11 +144,11 @@ def save_masks(model, thickness_discretization=0, file_format="pt"):
             thickness = torch.sigmoid(mask.phase.detach().cpu()) * wl[:, None, None] * 10 ** 6 / n[:, None, None]
         for j in range(n_wl):
             filename = "mask_" + str(j) + "_layer_" + str(i)
-            save_tensor(thickness[j, :, :], filename, file_format)
+            save_tensor(thickness[j, :, :], filename, file_format, float_format)
             if thickness_discretization:
-                save_tensor((discrete_thickness - thickness)[j, :, :], filename + "_error", file_format)
-                save_tensor(discrete_thickness[j, :, :], filename + "_discrete", file_format)
-                save_tensor((discrete_thickness / thickness_discretization / 10**6)[j, :, :],
+                save_tensor((discrete_thickness - thickness)[j, :, :], filename + "_error", file_format, float_format)
+                save_tensor(discrete_thickness[j, :, :], filename + "_discrete", file_format, float_format)
+                save_tensor(torch.round(discrete_thickness / thickness_discretization / 10**6)[j, :, :],
                             filename + "_steps", file_format)
 
 
