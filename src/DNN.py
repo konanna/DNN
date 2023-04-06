@@ -43,7 +43,7 @@ class Trainer:
                 (x[:, det_x0: det_x1 + 1, det_y0: det_y1 + 1].sum(dim=(1, 2)) / full_int).unsqueeze(-1))
         return torch.cat(detectors_list, dim=1)
 
-    def epoch_step(self, batch, unconstrain_phase=False, thickness_discretization=0):
+    def epoch_step(self, batch, unconstrain_phase=False, thickness_discretization=0, validation=False):
         """
         Обработка одного батча в процессе тренировки.
         param batch: (imgs, labels) батч с изображениями и их метками
@@ -53,17 +53,21 @@ class Trainer:
         images = F.pad(images, pad=(self.padding, self.padding, self.padding, self.padding))
         labels = labels.to(self.device)
 
-        out_img, _ = self.model(images, unconstrain_phase, thickness_discretization)
+        out_img, _ = self.model(images, unconstrain_phase, thickness_discretization, validation)
 
         out_label = self.detector_region(out_img)
         _, predicted = torch.max(out_label.data, 1)
         correct = (predicted == labels).sum().item()
         total = labels.size(0)
+        # if validation:
+        #     loss = self.val_loss_function(out_img, labels)
+        # else:
         loss = self.loss_function(out_img, labels)
         return loss, correct, total
 
     def train(self,
               loss_function,
+              # val_loss_function,
               optimizer,
               trainloader,
               testloader,
@@ -79,6 +83,7 @@ class Trainer:
                 'test accuracy': []}
         best_acc = 0
         self.loss_function = loss_function
+        # self.val_loss_function = val_loss_function
         for epoch in range(epochs):
             ep_loss = 0
             self.model.train()
@@ -104,7 +109,8 @@ class Trainer:
             total = 0
             with torch.no_grad():
                 for batch in tqdm(testloader):
-                    loss, batch_correct, batch_total = self.epoch_step(batch, unconstrain_phase)
+                    loss, batch_correct, batch_total = self.epoch_step(batch, unconstrain_phase,
+                                                                       thickness_discretization, validation=True)
                     ep_loss += loss.item()
                     correct += batch_correct
                     total += batch_total
@@ -191,16 +197,19 @@ class MaskLayer(torch.nn.Module):
         self.pixel_size = pixel_size
         self.N_neurons = N_neurons
 
-    def forward(self, E, unconstrain_phase=False, thickness_discretization=0):
+    def forward(self, E, unconstrain_phase=False, thickness_discretization=0, validation=False):
         out = E
         if self.diffractive_layer is not None:
             out = self.diffractive_layer(out)
         if unconstrain_phase:
             constr_phase = self.phase
-        elif thickness_discretization:
-            constr_phase = self.sigmoid_step_function(self.phase, thickness_discretization)
         else:
             constr_phase = 2 * np.pi * torch.sigmoid(self.phase)
+            if thickness_discretization:
+                if validation:
+                    constr_phase = self.true_step_function(constr_phase, thickness_discretization)
+                else:
+                    constr_phase = self.sigmoid_step_function(constr_phase, thickness_discretization)
         modulation = torch.cos(constr_phase) + 1j * torch.sin(constr_phase)
         if self.phase_amp_mod:
             if self.n is None:
@@ -227,7 +236,8 @@ class MaskLayer(torch.nn.Module):
 
     def sigmoid_step_function(self, phase, thickness_discretization, alpha=100):
         new_phase = torch.zeros(phase.shape, dtype=torch.float32, device=phase.device)
-        phase_discr = thickness_discretization * np.real(self.n[:, None, None]) / self.wl[:, None, None]
+        phase_discr = (thickness_discretization * np.real(self.n[:, None, None])/
+                        self.wl[:, None, None]).to(phase.device)
         phase_offset = 0.5 * phase_discr
         while phase_offset[0, 0, 0] < 2 * np.pi:
             new_phase = new_phase + phase_discr * torch.sigmoid(alpha * (phase - phase_offset))
@@ -358,14 +368,14 @@ class new_Fourier_DNN(torch.nn.Module):
                                                           include_amplitude=include_amplitude_modulation,
                                                           n=dn) for _ in range(0, num_layers)])
 
-    def forward(self, E, unconsrtain_phase=False, thick_discr=0):
+    def forward(self, E, unconsrtain_phase=False, thick_discr=0, validation=False):
         outputs = [E]
         E = self.lens_diffractive_layer(E)
         E = self.lens(E)
         E = self.first_diffractive_layer(E)
         outputs.append(E)
         for layer in self.mask_layers:
-            E = layer(E, unconsrtain_phase, thick_discr)
+            E = layer(E, unconsrtain_phase, thick_discr, validation)
             outputs.append(E)
         E = self.lens_diffractive_layer(E)
         E = self.lens(E)

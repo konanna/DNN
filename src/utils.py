@@ -61,7 +61,8 @@ def visualize(model, example, padding=58):
     plt.show()
 
 
-def mask_visualization(model, mode='phase', transpose=False):
+def mask_visualization(model, thickness_discretization=0,
+                       mode='phase', transpose=False):
     wl = model.mask_layers[0].wl.detach().cpu()
     n = np.real(model.mask_layers[0].n.detach().cpu())
     n_wl = wl.shape[0]
@@ -72,6 +73,8 @@ def mask_visualization(model, mode='phase', transpose=False):
         plt.figure(figsize=(5 * n_wl, 4 * n_layers))
     for i, mask in enumerate(model.mask_layers):
         phase = torch.sigmoid(mask.phase.detach().cpu())
+        if thickness_discretization != 0:
+            phase = mask.sigmoid_step_function(phase, thickness_discretization).detach().cpu()
         for j in range(n_wl):
             colorbar_label = 'Phase, deg.'
             if transpose:
@@ -99,6 +102,7 @@ def visualize_n_samples(model,
                         padding=58,
                         detector_pos=None,
                         unconstain_phase=False,
+                        thickness_discretization=0,
                         seed=17):
     plt.figure(figsize=(5 * n, 8))
     np.random.seed(seed)
@@ -106,7 +110,7 @@ def visualize_n_samples(model,
     device = model.device
     for number, ind in enumerate(rand_ind):
         ex = F.pad(dataset[ind][0], pad=(padding, padding, padding, padding))
-        out, _ = model(ex[None, :, :, :].to(device), unconstain_phase)
+        out, _ = model(ex[None, :, :, :].to(device), unconstain_phase, thickness_discretization)
         plt.subplot(2, n, number + 1)
         plt.imshow(ex[0], interpolation='none')
         plt.title(f'Input image with label {dataset[ind][1]}')
@@ -135,13 +139,12 @@ def save_masks(model, thickness_discretization=0, file_format="pt", float_format
     n = np.real(model.mask_layers[0].n)
     n_wl = wl.shape[0]
     for i, mask in enumerate(model.mask_layers):
+        thickness = torch.sigmoid(mask.phase)
         if thickness_discretization:
-            thickness = mask.sigmoid_step_function(mask.phase, thickness_discretization) * \
-                        wl[:, None, None] * 10 ** 6 / n[:, None, None]
-            discrete_thickness = mask.true_step_function(mask.phase, thickness_discretization) * \
-                                 wl[:, None, None] * 10 ** 6 / n[:, None, None]
-        else:
-            thickness = torch.sigmoid(mask.phase.detach().cpu()) * wl[:, None, None] * 10 ** 6 / n[:, None, None]
+            discrete_thickness = (mask.true_step_function(thickness, thickness_discretization)*
+                                  wl[:, None, None] * 10 ** 6 / n[:, None, None]).detach().cpu()
+            thickness = mask.sigmoid_step_function(thickness, thickness_discretization)
+        thickness = (thickness * wl[:, None, None] * 10 ** 6 / n[:, None, None]).detach().cpu()
         for j in range(n_wl):
             filename = "mask_" + str(j) + "_layer_" + str(i)
             save_tensor(thickness[j, :, :], filename, file_format, float_format)
