@@ -8,7 +8,7 @@ class DiffractiveLayer(torch.nn.Module):
     def __init__(self, wl=532e-9, N_pixels=400, pixel_size=20e-6, dz=0.01):
         super(DiffractiveLayer, self).__init__()
         # wl can be an integer or a list for images with multiple channels
-        wl_array = np.array(wl).reshape(-1, 1, 1)
+        wl_array = torch.tensor(np.array(wl).reshape(-1, 1, 1))
         fx = np.fft.fftshift(np.fft.fftfreq(N_pixels, d=pixel_size))
         fy = np.fft.fftshift(np.fft.fftfreq(N_pixels, d=pixel_size))
         fxx, fyy = np.meshgrid(fx, fy)
@@ -32,11 +32,11 @@ class Lens(torch.nn.Module):
 
     def __init__(self, focus, wl=532e-9, N_pixels=400, pixel_size=20e-6):
         super(Lens, self).__init__()
-        wl_array = np.array(wl).reshape(-1, 1, 1)
+        wl_array = torch.tensor(np.array(wl).reshape(-1, 1, 1))
         coord_limit = (N_pixels // 2) * pixel_size
         mesh = np.arange(-coord_limit, coord_limit - pixel_size / 2, pixel_size)
         x, y = np.meshgrid(mesh, mesh)
-        self.register_buffer('phase', torch.tensor(np.exp(-1j * np.pi / (wl_array * 2 * focus) * (x ** 2 + y ** 2))))
+        self.register_buffer('phase', torch.tensor(np.exp(-1j * np.pi / (wl_array * focus) * (x ** 2 + y ** 2))))
         self.register_buffer('amplitude', torch.zeros([N_pixels, N_pixels], dtype=torch.float32) + 1)
 
     def forward(self, E):
