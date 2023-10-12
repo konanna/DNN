@@ -8,6 +8,14 @@ import numpy as np
 import pandas as pd
 
 
+def gaussian_square_detector(det_size, sigma = 0.2):
+    x, y = np.meshgrid(np.linspace(-1,1,det_size), np.linspace(-1,1,det_size))
+    r_sqr = x**2 + y**2
+    gauss = 1/(np.sqrt(2 * np.pi) * sigma)*np.exp(-r_sqr / 2 / sigma ** 2)
+    detector = torch.from_numpy(gauss)
+    return detector
+
+
 def generate_det_row(det_size, start_pos_x, start_pos_y, det_step, N_det):
     p = []
     for i in range(N_det):
@@ -24,19 +32,24 @@ def set_det_pos(det_size=20, edge_x=10, edge_y=20, N_pixels=200):
     det_step_x_1 = (N_pixels - 2 * edge_x - 3 * det_size) // 2
     det_step_x_2 = (N_pixels - 2 * edge_x - 4 * det_size) // 3
     det_step_y = (N_pixels - 2 * edge_y - 3 * det_size) // 2 + det_size
-    p.append(generate_det_row(det_size, edge_x, edge_y, det_step_x_1, 3))
-    p.append(generate_det_row(det_size, edge_x, edge_y + det_step_y, det_step_x_2, 4))
-    p.append(generate_det_row(det_size, edge_x, edge_y + 2 * det_step_y, det_step_x_1, 3))
+    p.append(generate_det_row(det_size, edge_x, edge_y, det_step_x_1, 1))
+    p.append(generate_det_row(det_size, edge_x, edge_y + det_step_y, det_step_x_2, 0))
+    p.append(generate_det_row(det_size, edge_x, edge_y + 2 * det_step_y, det_step_x_1, 1))
     return list(chain.from_iterable(p))
 
 
-def get_detector_imgs(det_size=20, edge_x=10, edge_y=20, N_pixels=200, visualize=True):
+def get_detector_imgs(det_size=20, edge_x=10, edge_y=20, N_pixels=200,
+                      visualize=True, is_gaussian=False):
     detector_pos = set_det_pos(det_size, edge_x, edge_y, N_pixels)
-    labels_image_tensors = torch.zeros((10, N_pixels, N_pixels), dtype=torch.double)
+    labels_image_tensors = torch.zeros((2, N_pixels, N_pixels), dtype=torch.double)
+    gauss_detector = gaussian_square_detector(det_size, sigma=0.5)
     for ind, pos in enumerate(detector_pos):
         pos_l, pos_r, pos_u, pos_d = pos
-        labels_image_tensors[ind, pos_l + 1:pos_r + 1, pos_u + 1:pos_d + 1] = 1
-        labels_image_tensors[ind] = labels_image_tensors[ind]
+        labels_image_tensors[ind, pos_l + 1:pos_r + 1,
+                             pos_u + 1:pos_d + 1] = gauss_detector[None,:,:]
+        # labels_image_tensors[ind, pos_l + 1:pos_r + 1,
+        #                      pos_u + 1:pos_d + 1] = 1
+        # labels_image_tensors[ind] = labels_image_tensors[ind]
     if visualize:
         plt.imshow(np.zeros((N_pixels, N_pixels)))
         for det in detector_pos:
@@ -72,9 +85,9 @@ def mask_visualization(model, thickness_discretization=0,
     else:
         plt.figure(figsize=(5 * n_wl, 4 * n_layers))
     for i, mask in enumerate(model.mask_layers):
-        phase = torch.sigmoid(mask.phase.detach().cpu())
+        phase = torch.sigmoid(mask.phase).detach().cpu()
         if thickness_discretization != 0:
-            phase = mask.sigmoid_step_function(phase, thickness_discretization).detach().cpu()
+            phase = mask.sigmoid_step_function(phase, thickness_discretization)
         for j in range(n_wl):
             colorbar_label = 'Phase, deg.'
             if transpose:
@@ -84,9 +97,9 @@ def mask_visualization(model, thickness_discretization=0,
             if mode == 'phase':
                 plt.imshow(phase[j, :, :] * 360, interpolation='none')
             elif mode == 'thickness':
-                plt.imshow(phase[j, :, :] * wl[j, None, None] * 10 ** 6 / n[j, None, None],
+                plt.imshow((phase * wl * 10 ** 6 / n)[j, :, :],
                            interpolation='none')
-                colorbar_label = 'Thickness, um';
+                colorbar_label = 'Thickness, um'
             else:
                 print(f'Do not support mode = "{mode}". Only "thickness" or "phase"')
             plt.title(f'Mask {j + 1} of layer {i + 1}')
@@ -134,7 +147,8 @@ def save_tensor(tensor, filename, file_format="pt", float_format=None):
         df.to_csv(filename + ".csv", float_format=float_format, index=False)
 
 
-def save_masks(model, thickness_discretization=0, file_format="pt", float_format=None):
+def save_masks(model, thickness_discretization=0, file_format="pt",
+               float_format=None, filename_prefix=""):
     wl = model.mask_layers[0].wl
     n = np.real(model.mask_layers[0].n)
     n_wl = wl.shape[0]
@@ -142,17 +156,41 @@ def save_masks(model, thickness_discretization=0, file_format="pt", float_format
         thickness = torch.sigmoid(mask.phase)
         if thickness_discretization:
             discrete_thickness = (mask.true_step_function(thickness, thickness_discretization)*
-                                  wl[:, None, None] * 10 ** 6 / n[:, None, None]).detach().cpu()
+                                  wl * 10 ** 6 / n)
             thickness = mask.sigmoid_step_function(thickness, thickness_discretization)
-        thickness = (thickness * wl[:, None, None] * 10 ** 6 / n[:, None, None]).detach().cpu()
+        thickness = (thickness * wl * 10 ** 6 / n)
         for j in range(n_wl):
-            filename = "mask_" + str(j) + "_layer_" + str(i)
+            filename = filename_prefix + 'mask_{}_layer_{}'.format(j, i)
             save_tensor(thickness[j, :, :], filename, file_format, float_format)
             if thickness_discretization:
                 save_tensor((discrete_thickness - thickness)[j, :, :], filename + "_error", file_format, float_format)
                 save_tensor(discrete_thickness[j, :, :], filename + "_discrete", file_format, float_format)
                 save_tensor(torch.round(discrete_thickness / thickness_discretization / 10**6)[j, :, :],
                             filename + "_steps", file_format)
+
+
+def load_masks_from_file(model, file_format="pt", filename_prefix=""):
+  n_masks = len(model.mask_layers)
+  n_layers = model.mask_layers[0].wl.size(0)
+  n = torch.real(model.mask_layers[0].n)
+  wl = model.mask_layers[0].wl
+  phase = torch.tensor((0,0,0)).to(model.device)
+  if (filename_prefix):
+    filename_prefix += "_"
+  for i in range(n_masks):
+    filename = (filename_prefix +
+                'mask_{}_layer_{}.'.format(i, 0) +
+                file_format)
+    thickness = torch.load(filename).to(model.device)
+    phase = thickness[None,:,:] * n / (wl * 10 ** 6)
+    for j in range(1, n_layers):
+      filename = (filename_prefix +
+                  'mask_{}_layer_{}.'.format(i, j) +
+                  file_format)
+      thickness = torch.load(filename).to(model.device)
+      thickness = thickness[None,:,:] * n / (wl * 10 ** 6)
+      phase = torch.cat((phase, thickness), dim=0)
+    model.mask_layers[i].phase = torch.nn.Parameter(phase)
 
 
 def prop_vis(model, example, padding=58, mode='abs', name_list=None):

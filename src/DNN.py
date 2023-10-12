@@ -151,7 +151,9 @@ class MaskLayer(torch.nn.Module):
     Класс для амплитудно-фазовой маски
     """
 
-    def __init__(self, distance_before_mask=None, wl=532e-9, N_pixels=400, pixel_size=20e-6, N_neurons=20,
+    def __init__(self, distance_before_mask=None, wl=532e-9,
+                 N_pixels=1000, pixel_size=1e-6,
+                 N_neurons=20, neuron_size=2e-6,
                  include_amplitude=False, n=None):
         """
         :param distance_before_mask: расстояние, которое проходит излучение до маски
@@ -159,6 +161,7 @@ class MaskLayer(torch.nn.Module):
         :param N_pixels: число пикселей в изображении
         :param pixel_size: размер одного пикселя
         :param N_neurons: число нейронов (пикселей в маске)
+        :param neuron_size: размер нейронов - д.б. кратно больше размера пикселя
         :param include_amplitude: применять ли амплитудную модуляцию
         :param n: комплексный показатель преломления, для многоканальных изображений - список, len(n) = len(wl)
         """
@@ -168,34 +171,29 @@ class MaskLayer(torch.nn.Module):
         if distance_before_mask is not None:
             self.diffractive_layer = DiffractiveLayer(wl, N_pixels, pixel_size, distance_before_mask)
 
-        wl_size = 1
-        try:
-            wl_size = len(wl)
-        except TypeError:
-            wl = [wl]
-        finally:
-            self.register_buffer('wl', torch.tensor(wl, dtype=torch.float32))
+        wl = torch.tensor(np.array(wl).reshape(-1, 1, 1), dtype=torch.float32)
+        self.register_buffer('wl', wl)
 
-        n_size = 1
-        try:
-            n_size = len(n)
-        except TypeError:
-            n = [n]
-        finally:
-            if n_size == wl_size:
-                self.register_buffer('n', torch.tensor(n, dtype=torch.complex64))
-            elif n_size == 1:
-                self.register_buffer('n', torch.ones(wl_size, dtype=torch.complex64)*n[0])
-            else:
-                raise Exception("Numbers of wl does not match number of n")
+        n = torch.tensor(np.array(n).reshape(-1, 1, 1), dtype=torch.complex64)
+        if n.size(0) == wl.size(0) or n.size(0) == 1:
+            self.register_buffer('n', n)
+        else:
+            raise Exception("Numbers of wl does not match number of n")
 
-        self.phase = torch.nn.Parameter(torch.zeros([wl_size, N_neurons, N_neurons], dtype=torch.float32))
+        self.phase = torch.nn.Parameter(torch.zeros([wl.size(0), N_neurons, N_neurons],
+                                                    dtype=torch.float32))
+        # self.phase = torch.nn.Parameter(torch.rand([wl.size(0), N_neurons, N_neurons],
+        #                                             dtype=torch.float32))
         if include_amplitude and (n is None):
-            self.amplitude = torch.nn.Parameter(torch.zeros([wl_size, N_neurons, N_neurons], dtype=torch.float32) + 1)
+            # self.amplitude = torch.nn.Parameter(torch.zeros([wl.size(0), N_neurons, N_neurons],
+            #                                                 dtype=torch.float32) + 1)
+            self.amplitude = torch.nn.Parameter(torch.zeros([wl.size(0), N_neurons, N_neurons],
+                                                            dtype=torch.float32) + 1)
         self.phase_amp_mod = include_amplitude
         self.N_pixels = N_pixels
         self.pixel_size = pixel_size
         self.N_neurons = N_neurons
+        self.neuron_size = neuron_size
 
     def forward(self, E, unconstrain_phase=False, thickness_discretization=0, validation=False):
         out = E
@@ -215,13 +213,23 @@ class MaskLayer(torch.nn.Module):
             if self.n is None:
                 constr_amp = F.relu(self.amplitude) / F.relu(self.amplitude).max()
             else:
-                constr_amp = torch.exp(- self.n.imag[:, None, None] * 2 * np.pi / self.wl[:, None, None]
+                constr_amp = torch.exp(- self.n.imag * 2 * np.pi / self.wl
                                        * self.calc_thickness(constr_phase))
             modulation = constr_amp * modulation
-        modulation = transforms.functional.resize(modulation.real, self.N_pixels,
+
+        # изменение размера масок
+        mask_size_in_pixels = self.N_neurons * int(self.neuron_size //
+                                                   self.pixel_size)
+        mask_padding = (self.N_pixels - mask_size_in_pixels) // 2
+        mask_padding = (mask_padding, mask_padding, mask_padding, mask_padding)
+        modulation = transforms.functional.resize(modulation.real,
+                                                  mask_size_in_pixels,
                                                   transforms.InterpolationMode.NEAREST) \
-                     + transforms.functional.resize(modulation.imag, self.N_pixels,
+                     + transforms.functional.resize(modulation.imag,
+                                                    mask_size_in_pixels,
                                                     transforms.InterpolationMode.NEAREST) * 1j
+        modulation = transforms.functional.pad(modulation, mask_padding)
+        crop = out.size(-1)//2 - 50
         out = modulation * out
         return out
 
@@ -231,13 +239,13 @@ class MaskLayer(torch.nn.Module):
         """
         if phase is None:
             phase = 2 * np.pi * torch.sigmoid(self.phase)
-        thickness = self.wl[:, None, None] * phase / (2 * np.pi * np.real(self.n[:, None, None]))
+        thickness = self.wl * phase / (2 * np.pi * np.real(self.n))
         return thickness
 
     def sigmoid_step_function(self, phase, thickness_discretization, alpha=100):
         new_phase = torch.zeros(phase.shape, dtype=torch.float32, device=phase.device)
-        phase_discr = (thickness_discretization * np.real(self.n[:, None, None])/
-                        self.wl[:, None, None]).to(phase.device)
+        phase_discr = (thickness_discretization * torch.real(self.n)/
+                        self.wl).to(phase.device)
         phase_offset = 0.5 * phase_discr
         while phase_offset[0, 0, 0] < 2 * np.pi:
             new_phase = new_phase + phase_discr * torch.sigmoid(alpha * (phase - phase_offset))
@@ -246,7 +254,7 @@ class MaskLayer(torch.nn.Module):
 
     def true_step_function(self, phase, thickness_discretization):
         new_phase = torch.zeros(phase.shape, dtype=torch.float32, device=phase.device)
-        phase_discr = thickness_discretization * np.real(self.n[:, None, None]) / self.wl[:, None, None]
+        phase_discr = thickness_discretization * np.real(self.n) / self.wl
         phase_offset = 0.5 * phase_discr
         zero_values = torch.zeros(phase.shape, dtype=torch.float32, device=phase.device)
         while phase_offset[0, 0, 0] < 2 * np.pi:
@@ -349,8 +357,9 @@ class new_Fourier_DNN(torch.nn.Module):
                  num_layers=5,
                  wl=532e-9,
                  N_pixels=200,
-                 pixel_size=10e-6,
+                 pixel_size=1e-6,
                  N_neurons=40,
+                 neuron_size=2e-6,
                  distance=5e-3,
                  lens_focus=100e-3,
                  include_amplitude_modulation=True,
@@ -359,12 +368,12 @@ class new_Fourier_DNN(torch.nn.Module):
         self.lens_diffractive_layer = DiffractiveLayer(wl, N_pixels, pixel_size, lens_focus)
         self.lens = Lens(lens_focus, wl, N_pixels, pixel_size)
         self.first_diffractive_layer = DiffractiveLayer(wl, N_pixels, pixel_size, lens_focus - distance)
-
         self.mask_layers = torch.nn.ModuleList([MaskLayer(distance_before_mask=distance,
                                                           wl=wl,
                                                           N_pixels=N_pixels,
                                                           pixel_size=pixel_size,
                                                           N_neurons=N_neurons,
+                                                          neuron_size=neuron_size,
                                                           include_amplitude=include_amplitude_modulation,
                                                           n=dn) for _ in range(0, num_layers)])
 
