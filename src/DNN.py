@@ -248,7 +248,7 @@ class MaskLayer(torch.nn.Module):
                      + transforms.functional.resize(modulation.imag,
                                                     mask_size_in_pixels,
                                                     transforms.InterpolationMode.NEAREST) * 1j
-        modulation = transforms.functional.pad(modulation, mask_padding, 1)
+        modulation = transforms.functional.pad(modulation, mask_padding, 0)
         # modulation = ()
         return modulation
 

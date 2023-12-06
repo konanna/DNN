@@ -147,49 +147,69 @@ def save_tensor(tensor, filename, file_format="pt", float_format=None):
         df.to_csv(filename + ".csv", float_format=float_format, index=False)
 
 
-def save_masks(model, thickness_discretization=0, file_format="pt",
-               float_format=None, filename_prefix=""):
+def save_masks(model, saving_mode=0, thickness_discretization=0,
+               file_format="pt", float_format=None, filename_prefix=""):
+    """
+    Сохранение маски в файл
+    param model: Модель нейронной сети
+    param saving_mode: Режим сохранения:
+                       0 (default) - сохранение фазы как параметра сети,
+                       1 - толщины пикселей для печати
+    param thickness_discretization: Дискретизация по высоте при печати - tbd!!!
+                                    (0 - default, толщина меняется непрерывно)
+    param file_format: Расширение файла (pt - default)
+    param float_format: Формат записи числа в файл
+    param filename_prefix: Префикс в названии файла формата:
+                           "{filename_prefix}_mask_{}_layer_{}.{file_format}"
+    """
+    # thickness_discretization - to be done
+
     wl = model.mask_layers[0].wl
     n = np.real(model.mask_layers[0].n)
     n_wl = wl.shape[0]
     for i, mask in enumerate(model.mask_layers):
-        thickness = torch.sigmoid(mask.phase)
-        if thickness_discretization:
-            discrete_thickness = (mask.true_step_function(thickness, thickness_discretization)*
-                                  wl * 10 ** 6 / n)
-            thickness = mask.sigmoid_step_function(thickness, thickness_discretization)
-        thickness = (thickness * wl * 10 ** 6 / n)
+        out = mask.phase
+        if saving_mode == 1:
+          out = torch.sigmoid(out) * wl * 10 ** 6 / n
+        
         for j in range(n_wl):
             filename = filename_prefix + 'mask_{}_layer_{}'.format(j, i)
-            save_tensor(thickness[j, :, :], filename, file_format, float_format)
-            if thickness_discretization:
-                save_tensor((discrete_thickness - thickness)[j, :, :], filename + "_error", file_format, float_format)
-                save_tensor(discrete_thickness[j, :, :], filename + "_discrete", file_format, float_format)
-                save_tensor(torch.round(discrete_thickness / thickness_discretization / 10**6)[j, :, :],
-                            filename + "_steps", file_format)
+            save_tensor(out[j, :, :], filename, file_format, float_format)
 
 
-def load_masks_from_file(model, file_format="pt", filename_prefix=""):
+def load_masks_from_file(model, loading_mode=0,
+                         file_format="pt", filename_prefix=""):
+  """
+    Загрузка маски из файла
+    param model: Модель нейронной сети
+    param loading_mode: Режим загрузки:  - to be done
+                        0 (default) - фазы как парам,
+                        1 - толщины пикселей для печати
+    param float_format: Формат записи числа в файл
+    param filename_prefix: Префикс в названии файла формата:
+                           "{filename_prefix}_mask_{}_layer_{}.{file_format}"
+  """
+  # loading_mode=1 - to be done
+
   n_masks = len(model.mask_layers)
   n_layers = model.mask_layers[0].wl.size(0)
   n = torch.real(model.mask_layers[0].n)
   wl = model.mask_layers[0].wl
-  phase = torch.tensor((0,0,0)).to(model.device)
   if (filename_prefix):
     filename_prefix += "_"
   for i in range(n_masks):
     filename = (filename_prefix +
                 'mask_{}_layer_{}.'.format(i, 0) +
                 file_format)
-    thickness = torch.load(filename).to(model.device)
-    phase = thickness[None,:,:] * n / (wl * 10 ** 6)
+    phase = torch.load(filename).to(model.device)
     for j in range(1, n_layers):
       filename = (filename_prefix +
                   'mask_{}_layer_{}.'.format(i, j) +
                   file_format)
-      thickness = torch.load(filename).to(model.device)
-      thickness = thickness[None,:,:] * n / (wl * 10 ** 6)
-      phase = torch.cat((phase, thickness), dim=0)
+      phase = torch.cat((phase, torch.load(filename).to(model.device)), dim=0)
+    if loading_mode == 1:
+      phase /= wl * 10 ** 6 / n
+      phase = torch.logit
     model.mask_layers[i].phase = torch.nn.Parameter(phase)
 
 
