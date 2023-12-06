@@ -208,8 +208,8 @@ def load_masks_from_file(model, loading_mode=0,
                   file_format)
       phase = torch.cat((phase, torch.load(filename).to(model.device)), dim=0)
     if loading_mode == 1:
-      phase /= wl * 10 ** 6 / n
-      phase = torch.logit
+      phase = phase * n / (wl * 10 ** 6)
+      phase = torch.logit(phase)
     model.mask_layers[i].phase = torch.nn.Parameter(phase)
 
 
