@@ -169,6 +169,10 @@ def save_masks(model, saving_mode=0, thickness_discretization=0,
     n_wl = wl.shape[0]
     for i, mask in enumerate(model.mask_layers):
         out = mask.phase
+
+        if out.dim() == 2:
+          out = out[None, :, :]
+         
         if saving_mode == 1:
           out = torch.sigmoid(out) * wl * 10 ** 6 / n
         
